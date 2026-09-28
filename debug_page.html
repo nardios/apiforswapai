@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Returns Analysis Debug Console</title>
+	<style>
+		:root { color-scheme: light dark; }
+		body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 24px; line-height: 1.5; }
+		h1 { margin: 0 0 16px; font-size: 20px; }
+		section { border: 1px solid color-mix(in oklab, CanvasText 15%, Canvas); border-radius: 10px; padding: 16px; margin: 0 0 16px; }
+		label { display: block; font-weight: 600; margin: 8px 0 4px; }
+		input[type="text"], input[type="month"], input[type="file"] { width: 100%; max-width: 420px; padding: 8px; border-radius: 8px; border: 1px solid color-mix(in oklab, CanvasText 20%, Canvas); }
+		.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+		button { padding: 10px 14px; border-radius: 8px; border: 1px solid color-mix(in oklab, CanvasText 20%, Canvas); background: color-mix(in oklab, CanvasText 5%, Canvas); cursor: pointer; }
+		button.primary { background: #0b5fff; border-color: #0b5fff; color: white; }
+		button:disabled { opacity: 0.6; cursor: not-allowed; }
+		hr { border: none; border-top: 1px solid color-mix(in oklab, CanvasText 15%, Canvas); margin: 16px 0; }
+		.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+		pre { background: color-mix(in oklab, CanvasText 5%, Canvas); padding: 12px; border-radius: 8px; overflow: auto; }
+		.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid color-mix(in oklab, CanvasText 20%, Canvas); font-size: 12px; }
+		.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+		.notice { font-size: 12px; color: color-mix(in oklab, CanvasText 55%, Canvas); }
+		.small { font-size: 12px; }
+		.kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 10px; align-items: baseline; }
+		.kv div:nth-child(odd) { color: color-mix(in oklab, CanvasText 55%, Canvas); }
+		.hidden { display: none !important; }
+	</style>
+</head>
+<body>
+	<h1>Returns Analysis Debug Console</h1>
+	<p class="notice">Use this page to test CSV uploads against your Flask API endpoints, both sync and async. Results will render below.</p>
+
+	<section>
+		<div class="row">
+			<div>
+				<label for="store">Store</label>
+				<input id="store" type="text" placeholder="e.g. myshop" />
+			</div>
+			<div>
+				<label for="month">Month</label>
+				<input id="month" type="month" />
+			</div>
+			<div>
+				<label for="year">Year</label>
+				<input id="year" type="text" placeholder="YYYY" class="mono" />
+			</div>
+			<div>
+				<label for="file">CSV file</label>
+				<input id="file" type="file" accept=".csv" />
+			</div>
+		</div>
+		<div class="row" style="margin-top:12px">
+			<button id="btn-sync" class="primary">Run Sync (/process/sync)</button>
+			<button id="btn-async">Run Async (/process/async)</button>
+			<button id="btn-clear" type="button">Clear Output</button>
+		</div>
+		<div style="margin-top:8px">
+			<label for="baseUrl">API Base URL (optional)</label>
+			<input id="baseUrl" type="text" placeholder="Default: relative to this page (same origin)" />
+			<div class="notice small">Leave empty when you opened this page via /debug on the same Flask app.</div>
+		</div>
+	</section>
+
+	<section id="statusBox" class="hidden">
+		<div class="kv">
+			<div>Status</div><div id="statusVal"><span class="badge">idle</span></div>
+			<div>Request ID</div><div id="ridVal" class="mono">—</div>
+			<div>Endpoint</div><div id="endpointVal" class="mono">—</div>
+		</div>
+	</section>
+
+	<section id="resultBox" class="hidden">
+		<h2 style="margin:0 0 8px">Parsed Result</h2>
+		<div id="resultGrid" class="grid"></div>
+		<hr />
+		<details>
+			<summary>Raw JSON</summary>
+			<pre id="rawOut" class="mono"></pre>
+		</details>
+	</section>
+
+	<section id="logBox">
+		<h2 style="margin:0 0 8px">Log</h2>
+		<pre id="log" class="mono" style="max-height:260px"></pre>
+	</section>
+
+	<script>
+		const $ = (id) => document.getElementById(id);
+		const logEl = $("log");
+		const statusBox = $("statusBox");
+		const resultBox = $("resultBox");
+		const resultGrid = $("resultGrid");
+		const rawOut = $("rawOut");
+		const statusVal = $("statusVal");
+		const ridVal = $("ridVal");
+		const endpointVal = $("endpointVal");
+
+		let pollTimer = null;
+
+		function log(msg) {
+			const ts = new Date().toISOString();
+			logEl.textContent += `[${ts}] ${msg}\n`;
+			logEl.scrollTop = logEl.scrollHeight;
+		}
+
+		function showStatus(status, rid = "—", endpoint = "—") {
+			statusBox.classList.remove("hidden");
+			statusVal.innerHTML = `<span class="badge">${status}</span>`;
+			ridVal.textContent = rid || "—";
+			endpointVal.textContent = endpoint || "—";
+		}
+
+		function clearOutput() {
+			resultGrid.innerHTML = "";
+			rawOut.textContent = "";
+			resultBox.classList.add("hidden");
+			showStatus("idle", "—", "—");
+			log("Cleared output.");
+		}
+
+		function getBase() {
+			const val = $("baseUrl").value.trim();
+			if (!val) return ""; // relative to same origin
+			return val.replace(/\/+$/, "");
+		}
+
+		function getFormData() {
+			const store = $("store").value.trim();
+			const monthInput = $("month").value;
+			const year = $("year").value.trim();
+			const file = $("file").files[0];
+
+			let month = "";
+			if (monthInput) {
+				// month input is YYYY-MM
+				const [y, m] = monthInput.split("-");
+				month = `${m}`; // API expects month string, not enforced format
+				if (!year) $("year").value = y;
+			}
+			return { store, month, year: $("year").value.trim(), file };
+		}
+
+		function ensureInputs({ store, month, year, file }) {
+			if (!store || !month || !year) throw new Error("Please fill Store, Month, and Year.");
+			if (!file) throw new Error("Please choose a CSV file.");
+		}
+
+		function buildFormData({ store, month, year, file }) {
+			const fd = new FormData();
+			fd.append("store", store);
+			fd.append("month", month);
+			fd.append("year", year);
+			fd.append("file", file);
+			return fd;
+		}
+
+		function renderSections(obj, isAsyncEntry = false) {
+			resultGrid.innerHTML = "";
+			const sections = isAsyncEntry ? obj : (obj && obj.output ? obj.output : obj);
+			if (!sections || typeof sections !== "object") {
+				rawOut.textContent = JSON.stringify(obj, null, 2);
+				resultBox.classList.remove("hidden");
+				return;
+			}
+			const order = [
+				"FREQUENT RETURN REASONS",
+				"SIZE ISSUES",
+				"OTHER CONSIDERATIONS",
+				"COMMON ISSUES FOR SPECIFIC PRODUCT LABELS",
+				"NOTEWORTHY PRODUCTS"
+			];
+			for (const key of order) {
+				const val = sections[key] ?? sections[key.toLowerCase()] ?? "";
+				const card = document.createElement("div");
+				card.innerHTML = `
+					<section>
+						<h3 style="margin:0 0 8px">${key}</h3>
+						<div class="small notice">Raw text below (may include BBCode)</div>
+						<pre class="mono" style="white-space:pre-wrap">${(val ?? "").toString()}</pre>
+					</section>
+				`;
+				resultGrid.appendChild(card.firstElementChild);
+			}
+			rawOut.textContent = JSON.stringify(obj, null, 2);
+			resultBox.classList.remove("hidden");
+		}
+
+		async function submitSync() {
+			try {
+				clearInterval(pollTimer); pollTimer = null;
+				const data = getFormData();
+				ensureInputs(data);
+				const fd = buildFormData(data);
+				const url = `${getBase()}/process/sync`;
+				log(`POST ${url}`);
+				showStatus("running (sync)", "—", "/process/sync");
+				$("btn-sync").disabled = true;
+				$("btn-async").disabled = true;
+				const res = await fetch(url, { method: "POST", body: fd });
+				const json = await res.json();
+				log(`Response ${res.status}`);
+				if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+				renderSections(json);
+				showStatus("done", json.request_id, "/process/sync");
+			} catch (e) {
+				log(`Error (sync): ${e.message}`);
+				alert(e.message);
+				showStatus("error");
+			} finally {
+				$("btn-sync").disabled = false;
+				$("btn-async").disabled = false;
+			}
+		}
+
+		async function submitAsync() {
+			try {
+				clearInterval(pollTimer); pollTimer = null;
+				const data = getFormData();
+				ensureInputs(data);
+				const fd = buildFormData(data);
+				const url = `${getBase()}/process/async`;
+				log(`POST ${url}`);
+				showStatus("queued", "—", "/process/async");
+				$("btn-sync").disabled = true;
+				$("btn-async").disabled = true;
+				const res = await fetch(url, { method: "POST", body: fd });
+				const json = await res.json();
+				log(`Response ${res.status}`);
+				if (res.status !== 202) throw new Error(json.error || `HTTP ${res.status}`);
+				const rid = json.request_id;
+				showStatus("processing", rid, "/process/status/<id>");
+				pollForResult(rid);
+			} catch (e) {
+				log(`Error (async): ${e.message}`);
+				alert(e.message);
+				showStatus("error");
+				$("btn-sync").disabled = false;
+				$("btn-async").disabled = false;
+			}
+		}
+
+		function pollForResult(requestId) {
+			const base = getBase();
+			const statusUrl = `${base}/process/status/${encodeURIComponent(requestId)}`;
+			const readUrl = `${base}/read/entry/${encodeURIComponent(requestId)}`;
+			log(`Polling ${statusUrl}`);
+			pollTimer = setInterval(async () => {
+				try {
+					const res = await fetch(statusUrl);
+					if (res.status === 404) { log("Status: not found yet..."); return; }
+					const json = await res.json();
+					log(`Status: ${json.status}`);
+					if (json.status === "success" || json.status === "error") {
+						clearInterval(pollTimer); pollTimer = null;
+						log(`Fetching result ${readUrl}`);
+						const r2 = await fetch(readUrl);
+						const j2 = await r2.json();
+						renderSections(j2, true);
+						showStatus(json.status, requestId, "/read/entry/<id>");
+						$("btn-sync").disabled = false;
+						$("btn-async").disabled = false;
+					}
+				} catch (e) {
+					log(`Polling error: ${e.message}`);
+				}
+			}, 3000);
+		}
+
+		$("btn-sync").addEventListener("click", (e) => { e.preventDefault(); submitSync(); });
+		$("btn-async").addEventListener("click", (e) => { e.preventDefault(); submitAsync(); });
+		$("btn-clear").addEventListener("click", (e) => { e.preventDefault(); clearOutput(); });
+	</script>
+</body>
+</html>
+
+
