@@ -219,7 +219,15 @@ The CSV needs a header row. The service uses these columns:
 
 Any missing column is treated as empty, so the call won't fail, but the analysis will be poorer. **Each row is one returned item.**
 
-A ready-made example is in [`sample_returns.csv`](sample_returns.csv).
+Three ready-made examples are included. They have the same columns and different sizes:
+
+| File | Rows | Size | Use it to |
+|---|---|---|---|
+| [`sample_returns_small.csv`](sample_returns_small.csv) | 25 | ~2 KB | Quick, cheap end-to-end checks |
+| [`sample_returns_medium.csv`](sample_returns_medium.csv) | 500 | ~43 KB | A realistic month for a small store |
+| [`sample_returns_large.csv`](sample_returns_large.csv) | 8,000 | ~685 KB | Stress test: larger prompt, longer run, and the trim-level fallback |
+
+The data is synthetic and generated with a fixed seed. Each product has a dominant complaint (for example, the dress shirts are too tight and the coat has stitching problems), so the analysis should surface clear patterns.
 
 ---
 
@@ -245,7 +253,7 @@ These fail before reaching OpenAI, so they are free and instant.
 ```bash
 # Missing store/month/year -> 400
 curl -s -X POST http://localhost:8001/process/async \
-  -F "file=@sample_returns.csv"
+  -F "file=@sample_returns_small.csv"
 
 # Not a CSV -> 400
 echo "hello" > /tmp/x.txt
@@ -262,7 +270,7 @@ curl -s -i http://localhost:8001/process/status/does-not-exist
 # 1) Submit
 RID=$(curl -s -X POST http://localhost:8001/process/async \
   -F "store=acme-eu" -F "month=10" -F "year=2026" \
-  -F "file=@sample_returns.csv" | python -c "import sys,json; print(json.load(sys.stdin)['request_id'])")
+  -F "file=@sample_returns_small.csv" | python -c "import sys,json; print(json.load(sys.stdin)['request_id'])")
 echo "request_id=$RID"
 
 # 2) Poll until it stops returning 404 (usually under a minute)
@@ -281,7 +289,7 @@ curl -s http://localhost:8001/read/entry/$RID | python -m json.tool
 ```bash
 curl -s -X POST http://localhost:8001/process/sync \
   -F "store=acme-eu" -F "month=10" -F "year=2026" \
-  -F "file=@sample_returns.csv" | python -m json.tool
+  -F "file=@sample_returns_small.csv" | python -m json.tool
 ```
 
 ### 5. Browser test
@@ -334,7 +342,9 @@ Import the endpoints above into a Postman collection and run them with `postman 
 .
 ├── main.py               # Flask app, routes, OpenAI calls, DB model
 ├── debug_page.html       # Browser UI served at /debug
-├── sample_returns.csv    # Example input for testing
+├── sample_returns_small.csv    # Example inputs for testing (small / medium / large)
+├── sample_returns_medium.csv
+├── sample_returns_large.csv
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml    # API + autoheal
